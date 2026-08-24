@@ -271,9 +271,11 @@ def course_codes(course_id):
         raw = request.form.get("codes", "")
         codes = [line.strip() for line in raw.splitlines() if line.strip()]
         if codes:
-            db.add_codes(course_id, codes)
-            flash = f"تمت إضافة {len(codes)} كود."
-
+            result = db.add_codes(course_id, codes)
+            flash = f"تمت إضافة {result['added']} كود."
+            if result["skipped"]:
+                flash += f" — تم تجاهل {result['skipped']} كود لأنه كان موجود مسبقاً بنفس الكورس."
+                
     codes = db.get_codes_for_course(course_id)
     rows = ""
     for c in codes:
