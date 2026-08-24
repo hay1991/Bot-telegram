@@ -58,8 +58,35 @@ def init_db():
         );
         """
     )
-    try:
+      try:
         cur.execute("ALTER TABLE courses ADD COLUMN price_usdt REAL")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+
+    # تنظيف أي تكرار قديم بالأكواد قبل ما نضيف قيد يمنع التكرار مستقبلاً
+    cur.execute(
+        """
+        DELETE FROM codes
+        WHERE id NOT IN (
+            SELECT id FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY course_id, code
+                           ORDER BY used DESC, id ASC
+                       ) AS rn
+                FROM codes
+            )
+            WHERE rn = 1
+        )
+        """
+    )
+    conn.commit()
+
+    try:
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_codes_unique ON codes(course_id, code)"
+        )
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -168,16 +195,23 @@ def pull_unused_code(course_id: int):
     return row
 
 
-def add_codes(course_id: int, codes: list) -> int:
+def add_codes(course_id: int, codes: list) -> dict:
+    """بيضيف الأكواد الجديدة بس بيتجاهل أي كود موجود مسبقاً لنفس الكورس (منع تكرار)."""
     conn = get_conn()
-    conn.executemany(
-        "INSERT INTO codes (course_id, code) VALUES (?, ?)",
-        [(course_id, c) for c in codes],
-    )
+    added = 0
+    skipped = 0
+    for c in codes:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO codes (course_id, code) VALUES (?, ?)",
+            (course_id, c),
+        )
+        if cur.rowcount:
+            added += 1
+        else:
+            skipped += 1
     conn.commit()
     conn.close()
-    return len(codes)
-
+    return {"added": added, "skipped": skipped}
 
 def delete_unused_code(code_id: int) -> bool:
     """يحذف كود بس إذا لسا غير مستخدم (حماية من حذف كود اتباع لزبون)."""
