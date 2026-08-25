@@ -58,13 +58,12 @@ def init_db():
         );
         """
     )
-      try:
+    try:
         cur.execute("ALTER TABLE courses ADD COLUMN price_usdt REAL")
     except sqlite3.OperationalError:
         pass
     conn.commit()
 
-    # تنظيف أي تكرار قديم بالأكواد قبل ما نضيف قيد يمنع التكرار مستقبلاً
     cur.execute(
         """
         DELETE FROM codes
