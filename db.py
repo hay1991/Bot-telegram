@@ -221,7 +221,6 @@ def delete_unused_code(code_id: int) -> bool:
     conn.close()
     return deleted
 
-
 def mark_code_used(code_id: int, user_id: int):
     conn = get_conn()
     conn.execute(
@@ -230,7 +229,13 @@ def mark_code_used(code_id: int, user_id: int):
     )
     conn.commit()
     conn.close()
-    def claim_code(course_id: int, user_id: int):
+
+
+def claim_code(course_id: int, user_id: int):
+    """يحجز أول كود متاح لكورس معيّن ويعلّمه كمستخدم بعملية واحدة ذرية (atomic) —
+    بتمنع إمكانية تسليم نفس الكود مرتين لو صار طلبين بنفس اللحظة تماماً."""
+
+def claim_code(course_id: int, user_id: int):
     """يحجز أول كود متاح لكورس معيّن ويعلّمه كمستخدم بعملية واحدة ذرية (atomic) —
     بتمنع إمكانية تسليم نفس الكود مرتين لو صار طلبين بنفس اللحظة تماماً."""
     conn = get_conn()
