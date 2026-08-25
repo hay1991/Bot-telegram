@@ -230,6 +230,31 @@ def mark_code_used(code_id: int, user_id: int):
     )
     conn.commit()
     conn.close()
+    def claim_code(course_id: int, user_id: int):
+    """يحجز أول كود متاح لكورس معيّن ويعلّمه كمستخدم بعملية واحدة ذرية (atomic) —
+    بتمنع إمكانية تسليم نفس الكود مرتين لو صار طلبين بنفس اللحظة تماماً."""
+    conn = get_conn()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT * FROM codes WHERE course_id = ? AND used = 0 ORDER BY id LIMIT 1",
+            (course_id,),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            conn.close()
+            return None
+        conn.execute(
+            "UPDATE codes SET used = 1, used_by = ?, used_at = ? WHERE id = ? AND used = 0",
+            (user_id, datetime.utcnow().isoformat(), row["id"]),
+        )
+        conn.commit()
+        conn.close()
+        return row
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
 
 
 # ---------------------------------------------------------------------------
