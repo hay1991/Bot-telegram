@@ -381,16 +381,24 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # action == "approve"
-    code_row = pull_unused_code(order["course_id"])
+        code_row = claim_code(course_id, user.id)
     if not code_row:
-        await query.answer("ما في أكواد متبقية لهاد الكورس! 🚫", show_alert=True)
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=f"⚠️ لا يوجد أكواد متبقية لكورس #{order['course_id']}, لازم تعبّي مخزون جديد بأمر /addcodes",
+        set_order_status(order_id, "no_stock")
+        await update.message.reply_text(
+            "✅ الدفع تأكد، بس للأسف نفد مخزون الأكواد حالياً. تواصل معنا وبنرسلك الكود يدوياً بأسرع وقت 🙏"
         )
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"⚠️ طلب كريبتو مؤكد #{order_id} بس ما في أكواد متبقية لكورس {course['name']}!",
+                )
+            except Exception:
+                logger.exception("تعذر تنبيه الأدمن %s", admin_id)
+        context.user_data.pop("awaiting_txid", None)
         return
 
-    mark_code_used(code_row["id"], order["user_id"])
+    mark_tx_used(tx_hash, order_id)
     set_order_status(order_id, "approved")
 
     course = get_course(order["course_id"])
