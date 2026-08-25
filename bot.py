@@ -65,6 +65,7 @@ get_course = db.get_course
 available_codes_count = db.available_codes_count
 pull_unused_code = db.pull_unused_code
 mark_code_used = db.mark_code_used
+claim_code = db.claim_code
 create_order = db.create_order
 get_order = db.get_order
 set_order_status = db.set_order_status
@@ -245,7 +246,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     order_id = create_order(user.id, user.username or "", user.full_name, course_id, "crypto")
 
-    code_row = pull_unused_code(course_id)
+    code_row = claim_code(course_id, user.id)
     if not code_row:
         set_order_status(order_id, "no_stock")
         await update.message.reply_text(
@@ -263,7 +264,6 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     mark_tx_used(tx_hash, order_id)
-    mark_code_used(code_row["id"], user.id)
     set_order_status(order_id, "approved")
     context.user_data.pop("awaiting_txid", None)
 
@@ -381,24 +381,15 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # action == "approve"
-        code_row = claim_code(course_id, user.id)
+    code_row = claim_code(order["course_id"], order["user_id"])
     if not code_row:
-        set_order_status(order_id, "no_stock")
-        await update.message.reply_text(
-            "✅ الدفع تأكد، بس للأسف نفد مخزون الأكواد حالياً. تواصل معنا وبنرسلك الكود يدوياً بأسرع وقت 🙏"
+        await query.answer("ما في أكواد متبقية لهاد الكورس! 🚫", show_alert=True)
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=f"⚠️ لا يوجد أكواد متبقية لكورس #{order['course_id']}, لازم تعبّي مخزون جديد بأمر /addcodes",
         )
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=f"⚠️ طلب كريبتو مؤكد #{order_id} بس ما في أكواد متبقية لكورس {course['name']}!",
-                )
-            except Exception:
-                logger.exception("تعذر تنبيه الأدمن %s", admin_id)
-        context.user_data.pop("awaiting_txid", None)
         return
 
-    mark_tx_used(tx_hash, order_id)
     set_order_status(order_id, "approved")
 
     course = get_course(order["course_id"])
