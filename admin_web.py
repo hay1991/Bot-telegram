@@ -1,16 +1,29 @@
 # -*- coding: utf-8 -*-
 """
 لوحة تحكم ويب بسيطة لإدارة الكورسات والأكواد بدل التعديل المباشر بـ DB Browser
-أو كتابة أوامر بالبوت. محمية بـ Basic Auth (اسم مستخدم + كلمة سر من متغيرات البيئة).
+أو كتابة أوامر بالبوت. محمية بـ Basic Auth + CSRF + HTML escape.
 """
 import os
+import secrets
+import html
 from functools import wraps
 
-from flask import Flask, request, redirect, url_for, Response, render_template_string
+from flask import (
+    Flask,
+    request,
+    redirect,
+    url_for,
+    Response,
+    render_template_string,
+    session,
+    abort,
+)
 
 import db
 
 app = Flask(__name__)
+# مفتاح الجلسة لـ CSRF — يُفضّل ضبطه من البيئة في الإنتاج
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 
 ADMIN_WEB_USER = os.environ.get("ADMIN_WEB_USER", "admin")
 ADMIN_WEB_PASS = os.environ.get("ADMIN_WEB_PASS", "")
@@ -38,6 +51,28 @@ def require_auth(f):
         return f(*args, **kwargs)
 
     return wrapped
+
+
+def _get_csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_hex(32)
+        session["csrf_token"] = token
+    return token
+
+
+def _validate_csrf():
+    expected = session.get("csrf_token")
+    got = request.form.get("csrf_token", "")
+    if not expected or not got or not secrets.compare_digest(expected, got):
+        abort(400, description="CSRF token invalid or missing")
+
+
+def e(value) -> str:
+    """HTML-escape لأي قيمة قبل عرضها."""
+    if value is None:
+        return ""
+    return html.escape(str(value), quote=True)
 
 
 BASE = """
@@ -107,7 +142,13 @@ BASE = """
 
 
 def render(body_html, flash=None):
-    return render_template_string(BASE, body=body_html, flash=flash)
+    # flash نفسه لازم يكون escaped لو جاي من بيانات مستخدم
+    safe_flash = e(flash) if flash else None
+    return render_template_string(BASE, body=body_html, flash=safe_flash)
+
+
+def csrf_field():
+    return f'<input type="hidden" name="csrf_token" value="{e(_get_csrf_token())}">'
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +179,12 @@ def dashboard():
             else '<span class="badge bad">متوقف</span>'
         )
         low_stock = '<span class="badge warn">مخزون منخفض</span>' if remaining <= 3 else ""
-        crypto_price = f"{c['price_usdt']} USDT" if c["price_usdt"] else "—"
+        crypto_price = f"{e(c['price_usdt'])} USDT" if c["price_usdt"] else "—"
         rows += f"""
         <tr>
           <td>#{c['id']}</td>
-          <td>{c['name']}</td>
-          <td>{c['price']}</td>
+          <td>{e(c['name'])}</td>
+          <td>{e(c['price'])}</td>
           <td>{crypto_price}</td>
           <td>{remaining} {low_stock}</td>
           <td>{state_badge}</td>
@@ -170,27 +211,29 @@ def dashboard():
 # ---------------------------------------------------------------------------
 # إضافة / تعديل كورس
 # ---------------------------------------------------------------------------
-COURSE_FORM = """
+def course_form_html(name="", price="", shamcash_number="", price_usdt="", extra=""):
+    return f"""
 <div class="card">
   <form method="post">
+    {csrf_field()}
     <div class="row">
       <div>
         <label>اسم الكورس</label>
-        <input name="name" value="{name}" required>
+        <input name="name" value="{e(name)}" required>
       </div>
       <div>
         <label>السعر (نصي - للعرض بشام كاش، مثلاً 10$)</label>
-        <input name="price" value="{price}" required>
+        <input name="price" value="{e(price)}" required>
       </div>
     </div>
     <div class="row">
       <div>
         <label>رقم شام كاش</label>
-        <input name="shamcash_number" value="{shamcash_number}" required>
+        <input name="shamcash_number" value="{e(shamcash_number)}" required>
       </div>
       <div>
         <label>سعر الكريبتو بالدولار (اختياري - اتركه فاضي لو ما بدك تفعّل الكريبتو لهاد الكورس)</label>
-        <input name="price_usdt" value="{price_usdt}">
+        <input name="price_usdt" value="{e(price_usdt)}">
       </div>
     </div>
     <button class="btn" type="submit">حفظ</button>
@@ -204,18 +247,20 @@ COURSE_FORM = """
 @require_auth
 def new_course():
     if request.method == "POST":
+        _validate_csrf()
         name = request.form["name"].strip()
         price = request.form["price"].strip()
         shamcash = request.form["shamcash_number"].strip()
         price_usdt_raw = request.form.get("price_usdt", "").strip()
         course_id = db.create_course(name, price, shamcash)
         if price_usdt_raw:
-            db.set_course_price_usdt(course_id, float(price_usdt_raw))
+            try:
+                db.set_course_price_usdt(course_id, float(price_usdt_raw))
+            except ValueError:
+                pass
         return redirect(url_for("dashboard"))
 
-    body = "<div class='card'><h3>إضافة كورس جديد</h3></div>" + COURSE_FORM.format(
-        name="", price="", shamcash_number="", price_usdt="", extra=""
-    )
+    body = "<div class='card'><h3>إضافة كورس جديد</h3></div>" + course_form_html()
     return render(body)
 
 
@@ -227,19 +272,29 @@ def edit_course(course_id):
         return redirect(url_for("dashboard"))
 
     if request.method == "POST":
+        _validate_csrf()
         name = request.form["name"].strip()
         price = request.form["price"].strip()
         shamcash = request.form["shamcash_number"].strip()
         price_usdt_raw = request.form.get("price_usdt", "").strip()
-        price_usdt = float(price_usdt_raw) if price_usdt_raw else None
+        price_usdt = None
+        if price_usdt_raw:
+            try:
+                price_usdt = float(price_usdt_raw)
+            except ValueError:
+                price_usdt = None
         db.update_course(course_id, name, price, shamcash, price_usdt)
         return redirect(url_for("dashboard"))
 
     toggle_label = "إيقاف الكورس" if course["active"] else "تفعيل الكورس"
     extra = f"""
-    <a class="btn ghost" href="{url_for('toggle_course_web', course_id=course_id)}">{toggle_label}</a>
+    <form method="post" action="{url_for('toggle_course_web', course_id=course_id)}"
+          onsubmit="return confirm('متأكد بدك {e(toggle_label)}؟')">
+        {csrf_field()}
+        <button class="btn ghost" type="submit">{toggle_label}</button>
+    </form>
     """
-    body = f"<div class='card'><h3>تعديل: {course['name']}</h3></div>" + COURSE_FORM.format(
+    body = f"<div class='card'><h3>تعديل: {e(course['name'])}</h3></div>" + course_form_html(
         name=course["name"],
         price=course["price"],
         shamcash_number=course["shamcash_number"],
@@ -249,9 +304,10 @@ def edit_course(course_id):
     return render(body)
 
 
-@app.route("/courses/<int:course_id>/toggle")
+@app.route("/courses/<int:course_id>/toggle", methods=["POST"])
 @require_auth
 def toggle_course_web(course_id):
+    _validate_csrf()
     db.toggle_course_active(course_id)
     return redirect(url_for("dashboard"))
 
@@ -268,6 +324,7 @@ def course_codes(course_id):
 
     flash = None
     if request.method == "POST":
+        _validate_csrf()
         raw = request.form.get("codes", "")
         codes = [line.strip() for line in raw.splitlines() if line.strip()]
         if codes:
@@ -275,24 +332,27 @@ def course_codes(course_id):
             flash = f"تمت إضافة {result['added']} كود."
             if result["skipped"]:
                 flash += f" — تم تجاهل {result['skipped']} كود لأنه كان موجود مسبقاً بنفس الكورس."
-                
+
     codes = db.get_codes_for_course(course_id)
     rows = ""
     for c in codes:
         if c["used"]:
-            badge = f'<span class="badge bad">مستخدم (زبون #{c["used_by"]})</span>'
+            badge = f'<span class="badge bad">مستخدم (زبون #{e(c["used_by"])})</span>'
             action = ""
         else:
             badge = '<span class="badge good">متاح</span>'
-            action = f"""<a class="btn small danger"
-                href="{url_for('delete_code', course_id=course_id, code_id=c['id'])}"
-                onclick="return confirm('متأكد بدك تحذف هاد الكود؟')">حذف</a>"""
-        rows += f"<tr><td>{c['code']}</td><td>{badge}</td><td>{action}</td></tr>"
+            action = f"""<form method="post" action="{url_for('delete_code', course_id=course_id, code_id=c['id'])}"
+                onsubmit="return confirm('متأكد بدك تحذف هاد الكود؟')" style="display:inline">
+                {csrf_field()}
+                <button class="btn small danger" type="submit">حذف</button>
+            </form>"""
+        rows += f"<tr><td>{e(c['code'])}</td><td>{badge}</td><td>{action}</td></tr>"
 
     body = f"""
     <div class="card">
-      <h3>أكواد كورس: {course['name']}</h3>
+      <h3>أكواد كورس: {e(course['name'])}</h3>
       <form method="post">
+        {csrf_field()}
         <label>ألصق الأكواد الجديدة هون، كل كود بسطر لحاله</label>
         <textarea name="codes" rows="6" placeholder="ABC123&#10;DEF456&#10;GHI789"></textarea>
         <button class="btn" type="submit">إضافة الأكواد</button>
@@ -308,9 +368,10 @@ def course_codes(course_id):
     return render(body, flash=flash)
 
 
-@app.route("/courses/<int:course_id>/codes/<int:code_id>/delete")
+@app.route("/courses/<int:course_id>/codes/<int:code_id>/delete", methods=["POST"])
 @require_auth
 def delete_code(course_id, code_id):
+    _validate_csrf()
     db.delete_unused_code(code_id)
     return redirect(url_for("course_codes", course_id=course_id))
 
@@ -328,34 +389,35 @@ def orders_page():
         "rejected": '<span class="badge bad">مرفوض</span>',
         "no_stock": '<span class="badge bad">لا يوجد مخزون</span>',
     }
-
     def payment_label(o):
         method = o["payment_method"]
         ref = o["payment_ref"] if "payment_ref" in o.keys() else None
         if method == "crypto":
             return "🪙 كريبتو"
         if method == "haram":
-            ref_part = f" — رقم: {ref}" if ref else ""
+            ref_part = f" — رقم: {e(ref)}" if ref else ""
             return f"🏦 حوالة الهرم{ref_part}"
         return "💳 شام كاش"
 
     rows = ""
     for o in orders:
+        uname = e(o["username"]) if o["username"] else "—"
         rows += f"""
         <tr>
           <td>#{o['id']}</td>
-          <td>{o['full_name']} (@{o['username'] or '—'})</td>
-          <td>{o['course_name']}</td>
+          <td>{e(o['full_name'])} (@{uname})</td>
+          <td>{e(o['course_name'])}</td>
           <td>{payment_label(o)}</td>
-          <td>{status_badge.get(o['status'], o['status'])}</td>
-          <td class="muted">{o['created_at'][:16].replace('T',' ')}</td>
+          <td>{status_badge.get(o['status'], e(o['status']))}</td>
+          <td>{e(o['delivered_code']) if o['delivered_code'] else '—'}</td>
+          <td class="muted">{e(str(o['created_at'])[:16].replace('T',' '))}</td>
         </tr>
         """
     body = f"""
     <div class="card">
       <table>
-        <tr><th>#</th><th>الزبون</th><th>الكورس</th><th>طريقة الدفع</th><th>الحالة</th><th>التاريخ</th></tr>
-        {rows if orders else '<tr><td colspan="6" class="muted">ما في طلبات بعد.</td></tr>'}
+        <tr><th>#</th><th>الزبون</th><th>الكورس</th><th>طريقة الدفع</th><th>الحالة</th><th>الكود المسلَّم</th><th>التاريخ</th></tr>
+        {rows if orders else '<tr><td colspan="7" class="muted">ما في طلبات بعد.</td></tr>'}
       </table>
     </div>
     """

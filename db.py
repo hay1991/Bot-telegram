@@ -62,6 +62,14 @@ def init_db():
         cur.execute("ALTER TABLE courses ADD COLUMN price_usdt REAL")
     except sqlite3.OperationalError:
         pass
+    conn.commit()
+
+    try:
+        cur.execute("ALTER TABLE orders ADD COLUMN code_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+
     try:
         cur.execute("ALTER TABLE orders ADD COLUMN payment_ref TEXT")
     except sqlite3.OperationalError:
@@ -239,27 +247,30 @@ def claim_code(course_id: int, user_id: int):
     """يحجز أول كود متاح لكورس معيّن ويعلّمه كمستخدم بعملية واحدة ذرية (atomic) —
     بتمنع إمكانية تسليم نفس الكود مرتين لو صار طلبين بنفس اللحظة تماماً."""
     conn = get_conn()
-    conn.execute("BEGIN IMMEDIATE")
     try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM codes WHERE course_id = ? AND used = 0 ORDER BY id LIMIT 1",
             (course_id,),
         ).fetchone()
         if row is None:
             conn.commit()
-            conn.close()
             return None
-        conn.execute(
+        cur = conn.execute(
             "UPDATE codes SET used = 1, used_by = ?, used_at = ? WHERE id = ? AND used = 0",
             (user_id, datetime.utcnow().isoformat(), row["id"]),
         )
+        if cur.rowcount != 1:
+            # حصل سباق نادر — نرجع None بدل ما نرجع كود ما انحجز
+            conn.rollback()
+            return None
         conn.commit()
-        conn.close()
         return row
     except Exception:
         conn.rollback()
-        conn.close()
         raise
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -285,11 +296,25 @@ def get_order(order_id: int):
     return row
 
 
+def get_pending_order(user_id: int, course_id: int):
+    """بيرجع أحدث طلب لسا قيد الانتظار لنفس المستخدم ونفس الكورس، إذا موجود —
+    بيستخدم لمنع إنشاء أكتر من طلب معلّق بنفس الوقت لنفس الكورس."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM orders WHERE user_id = ? AND course_id = ? AND status = 'pending' "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id, course_id),
+    ).fetchone()
+    conn.close()
+    return row
+
+
 def get_recent_orders(limit: int = 50):
     conn = get_conn()
     rows = conn.execute(
-        "SELECT orders.*, courses.name AS course_name FROM orders "
+        "SELECT orders.*, courses.name AS course_name, codes.code AS delivered_code FROM orders "
         "JOIN courses ON courses.id = orders.course_id "
+        "LEFT JOIN codes ON codes.id = orders.code_id "
         "ORDER BY orders.id DESC LIMIT ?",
         (limit,),
     ).fetchall()
@@ -300,6 +325,13 @@ def get_recent_orders(limit: int = 50):
 def set_order_status(order_id: int, status: str):
     conn = get_conn()
     conn.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
+    conn.commit()
+    conn.close()
+
+
+def set_order_code(order_id: int, code_id: int):
+    conn = get_conn()
+    conn.execute("UPDATE orders SET code_id = ? WHERE id = ?", (code_id, order_id))
     conn.commit()
     conn.close()
 
@@ -334,10 +366,34 @@ def is_tx_used(tx_hash: str) -> bool:
 
 
 def mark_tx_used(tx_hash: str, order_id: int):
+    """تسجيل TxID مستخدم (غير ذري — استخدم try_reserve_tx للحالات الحساسة)."""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO used_tx (tx_hash, order_id, used_at) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO used_tx (tx_hash, order_id, used_at) VALUES (?, ?, ?)",
         (tx_hash, order_id, datetime.utcnow().isoformat()),
     )
     conn.commit()
     conn.close()
+
+
+def try_reserve_tx(tx_hash: str, order_id: int) -> bool:
+    """يحجز رقم العملية بشكل ذري.
+    يرجع True إذا نجح الحجز (أول من استخدمه)، False إذا كان مستخدم مسبقاً.
+    يمنع سباق الطلبات المتزامنة على نفس الـ TxID."""
+    tx_hash = (tx_hash or "").strip().lower()
+    if not tx_hash:
+        return False
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO used_tx (tx_hash, order_id, used_at) VALUES (?, ?, ?)",
+            (tx_hash, order_id, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
