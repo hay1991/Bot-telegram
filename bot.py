@@ -2,8 +2,7 @@
 """
 بوت تلغرام لبيع أكواد الكورسات - Deeb Learning
 =================================================
-ثلاث طرق للدفع:
-
+أربع طرق للدفع:
 1) شام كاش — تأكيد يدوي:
    المستخدم يبعت صورة إثبات التحويل -> الأدمن يوافق يدوياً -> البوت يبعت الكود
 
@@ -12,10 +11,12 @@
    تلقائياً عبر API عام ومجاني من TronScan (بدون أي طرف ثالث غير رسمي) ->
    لو كل شي مطابق (العنوان، المبلغ، العملية غير مستخدمة قبل) يبعت الكود فوراً
 
-3) حوالة الهرم — تأكيد يدوي:
+3) USDT (شبكة BEP20 / BSC) — تأكيد آلي بالكامل:
+   نفس فكرة TRC20 بالضبط، بس عبر BscScan API وعنوان عقد USDT الرسمي على BSC
+
+4) حوالة الهرم — تأكيد يدوي:
    المستخدم يحوّل عبر فرع هرم -> يبعت رقم/كود الحوالة -> الأدمن يوافق يدوياً -> البوت يبعت الكود
 """
-
 import os
 import time
 import logging
@@ -38,14 +39,30 @@ import db
 # الإعدادات
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+
 # آي دي حسابات الأدمن (يفصل بينها بفاصلة إذا في أكثر من أدمن), مثال: "111111,222222"
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
 # عنوان محفظتك على شبكة TRC20 (اللي رح يحوّل عليه الزباين USDT)
 TRON_WALLET_ADDRESS = os.environ.get("TRON_WALLET_ADDRESS", "")
+
 # مفتاح TronScan اختياري (بيرفع حد عدد الطلبات المسموحة بالدقيقة، مو إلزامي للتشغيل الأساسي)
 TRONSCAN_API_KEY = os.environ.get("TRONSCAN_API_KEY", "")
 TRONSCAN_URL = "https://apilist.tronscanapi.com/api/transaction-info"
+
+# عنوان محفظتك على شبكة BEP20 / BSC (اللي رح يحوّل عليه الزباين USDT عبر Binance Smart Chain)
+BSC_WALLET_ADDRESS = os.environ.get("BSC_WALLET_ADDRESS", "")
+
+# مفتاح BscScan — موصى فيه بشدة، بدونه حد الطلبات المجاني منخفض جداً وممكن يفشل التحقق بأوقات الضغط
+BSCSCAN_API_KEY = os.environ.get("BSCSCAN_API_KEY", "")
+BSCSCAN_URL = "https://api.bscscan.com/api"
+
+# عنوان العقد الرسمي لـ USDT (Binance-Peg) على شبكة BEP20/BSC (ثابت، ما بيتغيّر)
+# تأكد منه بنفسك عالموقع الرسمي (bscscan.com) قبل ما تفعّل الدفع فعلياً
+USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
+
+# حد أدنى من التأكيدات على شبكة BSC قبل قبول العملية
+BSC_MIN_CONFIRMATIONS = 3
 
 # اسم المستلم الكامل لحوالات الهرم (نص ثابت لكل الكورسات)
 HARAM_RECEIVER_NAME = os.environ.get("HARAM_RECEIVER_NAME", "")
@@ -66,13 +83,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ذاكرة بسيطة لـ rate limit (تتصفر مع إعادة تشغيل العملية)
 _rate_hits: dict[int, list[float]] = defaultdict(list)
-
 
 # ---------------------------------------------------------------------------
 # أدوات مساعدة - عامة
-# (قاعدة البيانات نفسها صارت بملف db.py المشترك مع لوحة التحكم عبر الويب)
 # ---------------------------------------------------------------------------
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -82,7 +96,6 @@ def check_rate_limit(user_id: int) -> bool:
     """يرجع True إذا مسموح، False إذا تجاوز الحد."""
     now = time.time()
     hits = _rate_hits[user_id]
-    # تنظيف القديم القديمة
     _rate_hits[user_id] = [t for t in hits if now - t < RATE_LIMIT_WINDOW]
     if len(_rate_hits[user_id]) >= RATE_LIMIT_MAX:
         return False
@@ -124,7 +137,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not courses:
         await update.message.reply_text("ما في كورسات متاحة حالياً، تابعنا قريباً 🌱")
         return
-
     keyboard = [
         [InlineKeyboardButton(f"{c['name']} - {c['price']}", callback_data=f"course_{c['id']}")]
         for c in courses
@@ -148,6 +160,7 @@ async def course_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("💳 شام كاش", callback_data=f"pay_shamcash_{course_id}")],
         [InlineKeyboardButton("🪙 USDT (TRC20)", callback_data=f"pay_crypto_{course_id}")],
+        [InlineKeyboardButton("🪙 USDT (BEP20)", callback_data=f"pay_cryptobep_{course_id}")],
         [InlineKeyboardButton("🏦 حوالة الهرم", callback_data=f"pay_haram_{course_id}")],
     ]
     await query.edit_message_text(
@@ -170,6 +183,7 @@ async def payment_method_selected(update: Update, context: ContextTypes.DEFAULT_
     # ننظف أي حالة سابقة عالقة بهاد المستخدم
     context.user_data.pop("pending_course", None)
     context.user_data.pop("awaiting_txid", None)
+    context.user_data.pop("awaiting_txid_network", None)
     context.user_data.pop("awaiting_haram", None)
 
     if method == "shamcash":
@@ -204,7 +218,31 @@ async def payment_method_selected(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(text, parse_mode="Markdown")
         return
 
-    # method == "crypto"
+    if method == "cryptobep":
+        if not course["price_usdt"]:
+            await query.edit_message_text(
+                "الدفع بالكريبتو مو مفعّل لهاد الكورس بعد. اختار شام كاش أو تواصل معنا."
+            )
+            return
+        if not BSC_WALLET_ADDRESS:
+            await query.edit_message_text(
+                "الدفع عبر BEP20 مو جاهز حالياً (ما في عنوان محفظة محدد). اختار طريقة تانية بدلاً عنه."
+            )
+            return
+        context.user_data["awaiting_txid"] = course_id
+        context.user_data["awaiting_txid_network"] = "bep20"
+        text = (
+            f"📚 *{course['name']}*\n"
+            f"💵 المبلغ المطلوب: `{course['price_usdt']}` USDT\n"
+            f"🌐 الشبكة: *BEP20 (BSC)* فقط (لا ترسل عبر أي شبكة تانية)\n\n"
+            f"1️⃣ حوّل المبلغ بالضبط لهاد العنوان:\n`{BSC_WALLET_ADDRESS}`\n"
+            f"2️⃣ بعدين ابعت هون *رقم العملية (Transaction Hash)* كنص\n\n"
+            f"البوت رح يتحقق أوتوماتيكياً ويبعتلك الكود مباشرة إذا كل شي مطابق ⚡"
+        )
+        await query.edit_message_text(text, parse_mode="Markdown")
+        return
+
+    # method == "crypto" (TRC20)
     if not course["price_usdt"]:
         await query.edit_message_text(
             "الدفع بالكريبتو مو مفعّل لهاد الكورس بعد. اختار شام كاش أو تواصل معنا."
@@ -215,8 +253,8 @@ async def payment_method_selected(update: Update, context: ContextTypes.DEFAULT_
             "الدفع بالكريبتو مو جاهز حالياً (ما في عنوان محفظة محدد). اختار شام كاش بدلاً عنه."
         )
         return
-
     context.user_data["awaiting_txid"] = course_id
+    context.user_data["awaiting_txid_network"] = "trc20"
     text = (
         f"📚 *{course['name']}*\n"
         f"💵 المبلغ المطلوب: `{course['price_usdt']}` USDT\n"
@@ -259,7 +297,6 @@ async def receive_payment_proof(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     order_id = create_order(user.id, user.username or "", user.full_name, course_id, "shamcash")
-
     caption = (
         f"🆕 طلب اشتراك جديد #{order_id} (شام كاش)\n"
         f"👤 {user.full_name} (@{user.username or '—'})\n"
@@ -275,7 +312,6 @@ async def receive_payment_proof(update: Update, context: ContextTypes.DEFAULT_TY
             ]
         ]
     )
-
     photo = update.message.photo[-1].file_id if update.message.photo else None
     sent_refs = []
     for admin_id in ADMIN_IDS:
@@ -291,8 +327,8 @@ async def receive_payment_proof(update: Update, context: ContextTypes.DEFAULT_TY
             sent_refs.append((admin_id, msg.message_id))
         except Exception:
             logger.exception("تعذر إرسال الطلب للأدمن %s", admin_id)
-    register_admin_message_refs(context, order_id, sent_refs)
 
+    register_admin_message_refs(context, order_id, sent_refs)
     context.user_data.pop("pending_course", None)
     await update.message.reply_text(
         "تم استلام إثبات الدفع ✅\nرح يتم التأكيد يدوياً وبتوصلك رسالة فيها الكود قريباً 🙏"
@@ -310,18 +346,15 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⏳ أرسلت طلبات كثيرة خلال وقت قصير. استنى دقيقة وجرب مرة تانية."
             )
             return
-
         transfer_ref = (update.message.text or "").strip()
         if not transfer_ref:
             await update.message.reply_text("أرسل رقم/كود الحوالة كنص.")
             return
-
         course = get_course(haram_course_id)
         if not course:
             await update.message.reply_text("صار في خطأ، جرب /start من جديد.")
             context.user_data.pop("awaiting_haram", None)
             return
-
         existing = get_pending_order(user.id, haram_course_id)
         if existing:
             context.user_data.pop("awaiting_haram", None)
@@ -330,11 +363,9 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"استنى رد الأدمن قبل ما تبعت طلب جديد. إذا في تأخير، تواصل معنا مباشرة 🙏"
             )
             return
-
         order_id = create_order(
             user.id, user.username or "", user.full_name, haram_course_id, "haram", payment_ref=transfer_ref
         )
-
         caption = (
             f"🆕 طلب اشتراك جديد #{order_id} (حوالة الهرم)\n"
             f"👤 {user.full_name} (@{user.username or '—'})\n"
@@ -359,17 +390,18 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 logger.exception("تعذر إرسال الطلب للأدمن %s", admin_id)
         register_admin_message_refs(context, order_id, sent_refs)
-
         context.user_data.pop("awaiting_haram", None)
         await update.message.reply_text(
             "تم استلام رقم الحوالة ✅\nرح يتم التأكيد يدوياً وبتوصلك رسالة فيها الكود قريباً 🙏"
         )
         return
 
-    # --- كريبتو (TxID) ---
+    # --- كريبتو (TxID) — TRC20 أو BEP20 ---
     course_id = context.user_data.get("awaiting_txid")
     if not course_id:
         return  # مش رقم عملية متوقع، تجاهل
+
+    network = context.user_data.get("awaiting_txid_network", "trc20")
 
     user = update.effective_user
     if not check_rate_limit(user.id):
@@ -379,10 +411,9 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     tx_hash = (update.message.text or "").strip().lower()
-    # تصفية سريعة لشكل TxID تقريبي (64 حرف hex غالباً)
     if not tx_hash or len(tx_hash) < 20:
         await update.message.reply_text(
-            "رقم العملية غير صالح. انسخ Transaction Hash / TxID كاملاً من المحفظة."
+            "رقم العملية غير صالح. انسخ Transaction Hash كاملاً من المحفظة."
         )
         return
 
@@ -391,7 +422,6 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("صار في خطأ، جرب /start من جديد.")
         return
 
-    # فحص سريع قبل الاتصال بالشبكة
     if is_tx_used(tx_hash):
         await update.message.reply_text(
             "⚠️ رقم العملية هاد مستخدم قبل. إذا فيك شك تواصل معنا مباشرة."
@@ -400,20 +430,28 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔎 عم نتحقق من العملية على البلوكتشين، لحظات...")
 
-    ok, message = await verify_tron_tx(tx_hash, course["price_usdt"])
+    if network == "bep20":
+        ok, message = await verify_bsc_tx(tx_hash, course["price_usdt"])
+        payment_method_value = "crypto_bep20"
+        network_label = "BEP20"
+    else:
+        ok, message = await verify_tron_tx(tx_hash, course["price_usdt"])
+        payment_method_value = "crypto_trc20"
+        network_label = "TRC20"
+
     if not ok:
         await update.message.reply_text(f"❌ {message}\nتأكد من رقم العملية وجرب تبعته من جديد.")
         return
 
-    order_id = create_order(user.id, user.username or "", user.full_name, course_id, "crypto")
+    order_id = create_order(user.id, user.username or "", user.full_name, course_id, payment_method_value)
 
-    # حجز ذري للـ TxID — يمنع استخدام نفس الرقم من طلبين متزامنين
     if not try_reserve_tx(tx_hash, order_id):
         set_order_status(order_id, "rejected")
         await update.message.reply_text(
             "⚠️ رقم العملية هاد استُخدم للتو من طلب آخر. إذا فيك شك تواصل معنا مباشرة."
         )
         context.user_data.pop("awaiting_txid", None)
+        context.user_data.pop("awaiting_txid_network", None)
         return
 
     code_row = claim_code(course_id, user.id)
@@ -426,19 +464,21 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"⚠️ طلب كريبتو مؤكد #{order_id} بس ما في أكواد متبقية لكورس {course['name']}!",
+                    text=f"⚠️ طلب كريبتو ({network_label}) مؤكد #{order_id} بس ما في أكواد متبقية لكورس {course['name']}!",
                 )
             except Exception:
                 logger.exception("تعذر تنبيه الأدمن %s", admin_id)
         context.user_data.pop("awaiting_txid", None)
+        context.user_data.pop("awaiting_txid_network", None)
         return
 
     set_order_code(order_id, code_row["id"])
     set_order_status(order_id, "approved")
     context.user_data.pop("awaiting_txid", None)
+    context.user_data.pop("awaiting_txid_network", None)
 
     await update.message.reply_text(
-        f"🎉 تم تأكيد الدفع تلقائياً عن طريق البلوكتشين!\n"
+        f"🎉 تم تأكيد الدفع تلقائياً عن طريق البلوكتشين ({network_label})!\n"
         f"📚 كورس: {escape_md(course['name'])}\n"
         f"🔑 كود التفعيل: `{code_row['code']}`\n\n"
         f"بالتوفيق! 🌟",
@@ -450,7 +490,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=(
-                    f"✅ طلب كريبتو #{order_id} تأكد آلياً وانبعت الكود\n"
+                    f"✅ طلب كريبتو ({network_label}) #{order_id} تأكد آلياً وانبعت الكود\n"
                     f"👤 {user.full_name} (@{user.username or '—'})\n"
                     f"📚 {course['name']} - {course['price_usdt']} USDT"
                 ),
@@ -479,10 +519,8 @@ async def verify_tron_tx(tx_hash: str, expected_amount: float):
     data = resp.json()
     if not data or "hash" not in data:
         return False, "رقم العملية غير موجود أو غير صحيح."
-
     if data.get("confirmed") is False:
         return False, "العملية لسا ما تأكدت على الشبكة، استنى شوي وجرب تبعت الرقم من جديد."
-
     if data.get("contractRet") not in (None, "SUCCESS"):
         return False, "العملية فشلت على الشبكة (Failed)."
 
@@ -495,6 +533,7 @@ async def verify_tron_tx(tx_hash: str, expected_amount: float):
     contract_address = transfer.get("contract_address", "")
     decimals = int(transfer.get("decimals", 6))
     amount_raw = transfer.get("amount_str") or transfer.get("amount") or "0"
+
     try:
         amount = int(amount_raw) / (10 ** decimals)
     except (ValueError, TypeError):
@@ -502,16 +541,74 @@ async def verify_tron_tx(tx_hash: str, expected_amount: float):
 
     if to_address != TRON_WALLET_ADDRESS:
         return False, "العملية ما وصلت لعنواننا. تأكد إنك حولت للعنوان الصحيح."
-
     if symbol.upper() != "USDT":
         return False, "العملية مو بعملة USDT."
-
-    # تحقق إضافي من عنوان العقد الرسمي لـ USDT-TRC20 (يمنع خداع بتوكن مقلّد بنفس اسم "USDT")
-    # ملاحظة: لو الحقل contract_address غير متوفر بهاد الرد من TronScan، بنتجاوز هالفحص
-    # ونعتمد على فحص symbol فقط كما كان سابقاً (fail-open بدل fail-closed لتجنب رفض عمليات صحيحة).
     if contract_address and contract_address != USDT_TRC20_CONTRACT:
         return False, "العملية مو بعملة USDT الرسمية على شبكة TRC20 (عنوان العقد غير مطابق)."
+    if amount + AMOUNT_TOLERANCE < expected_amount:
+        return False, f"المبلغ المحوّل ({amount} USDT) أقل من المطلوب ({expected_amount} USDT)."
 
+    return True, ""
+
+
+async def verify_bsc_tx(tx_hash: str, expected_amount: float):
+    """يتحقق من عملية USDT-BEP20 عبر API عام من BscScan (endpoint: account/tokentx).
+    بيدور عن الـ tx_hash داخل آخر تحويلات USDT الواصلة لمحفظتنا، ويتأكد من:
+    العنوان المستلم، عنوان العقد الرسمي، المبلغ، وعدد كافٍ من التأكيدات.
+    يرجع (True, "") لو كل شي مطابق، أو (False, "سبب الرفض") لو في مشكلة."""
+    if not BSCSCAN_API_KEY:
+        return False, "التحقق من BEP20 مو جاهز حالياً (ناقص إعداد من طرفنا)."
+
+    params = {
+        "module": "account",
+        "action": "tokentx",
+        "contractaddress": USDT_BEP20_CONTRACT,
+        "address": BSC_WALLET_ADDRESS,
+        "sort": "desc",
+        "apikey": BSCSCAN_API_KEY,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(BSCSCAN_URL, params=params)
+    except Exception:
+        logger.exception("فشل الاتصال بـ BscScan")
+        return False, "تعذر الاتصال بشبكة التحقق حالياً، جرب بعد شوي."
+
+    if resp.status_code != 200:
+        return False, "تعذر التحقق من العملية حالياً، جرب بعد شوي."
+
+    data = resp.json()
+    result = data.get("result")
+    if data.get("status") != "1" or not isinstance(result, list):
+        return False, "رقم العملية غير موجود أو غير صحيح."
+
+    tx_hash_lower = tx_hash.lower()
+    match = next((t for t in result if t.get("hash", "").lower() == tx_hash_lower), None)
+    if not match:
+        return False, "رقم العملية غير موجود أو غير صحيح."
+
+    to_address = (match.get("to") or "").lower()
+    contract_address = (match.get("contractAddress") or "").lower()
+
+    if to_address != BSC_WALLET_ADDRESS.lower():
+        return False, "العملية ما وصلت لعنواننا. تأكد إنك حولت للعنوان الصحيح."
+    if contract_address != USDT_BEP20_CONTRACT.lower():
+        return False, "العملية مو بعملة USDT الرسمية على شبكة BEP20."
+
+    try:
+        decimals = int(match.get("tokenDecimal", 18))
+        amount = int(match.get("value", "0")) / (10 ** decimals)
+    except (ValueError, TypeError):
+        return False, "تعذر قراءة مبلغ العملية."
+
+    try:
+        confirmations = int(match.get("confirmations", "0") or "0")
+    except (ValueError, TypeError):
+        confirmations = 0
+
+    if confirmations < BSC_MIN_CONFIRMATIONS:
+        return False, "العملية لسا ما تأكدت كفاية على الشبكة، استنى شوي وجرب تبعت الرقم من جديد."
     if amount + AMOUNT_TOLERANCE < expected_amount:
         return False, f"المبلغ المحوّل ({amount} USDT) أقل من المطلوب ({expected_amount} USDT)."
 
@@ -521,6 +618,7 @@ async def verify_tron_tx(tx_hash: str, expected_amount: float):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_course", None)
     context.user_data.pop("awaiting_txid", None)
+    context.user_data.pop("awaiting_txid_network", None)
     context.user_data.pop("awaiting_haram", None)
     await update.message.reply_text("تم إلغاء الطلب الحالي. اضغط /start للبدء من جديد.")
 
@@ -529,15 +627,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # رد الأدمن على طلبات شام كاش / حوالة الهرم (قبول / رفض)
 # ---------------------------------------------------------------------------
 def register_admin_message_refs(context: ContextTypes.DEFAULT_TYPE, order_id: int, refs: list):
-    """يخزّن (chat_id, message_id) لكل رسالة انبعتت للأدمنز عن هاد الطلب،
-    منشان نقدر لاحقاً نشيل الأزرار منها لما الطلب يتحسم (قبول/رفض)."""
     store = context.bot_data.setdefault("admin_msg_refs", {})
     store[order_id] = refs
 
 
 async def clear_admin_message_buttons(context: ContextTypes.DEFAULT_TYPE, order_id: int):
-    """يشيل الأزرار من كل رسائل الأدمنز المرتبطة بهاد الطلب بعد ما ينحسم،
-    منشان ما تضل أزرار "قبول/رفض" فعّالة على رسالة طلب خلص التعامل معه."""
     store = context.bot_data.get("admin_msg_refs", {})
     refs = store.get(order_id, [])
     for chat_id, message_id in refs:
@@ -550,21 +644,18 @@ async def clear_admin_message_buttons(context: ContextTypes.DEFAULT_TYPE, order_
 
 
 async def _edit_admin_message(query, new_text: str):
-    """يعدل رسالة الأدمن سواء كانت صورة (caption) أو نص عادي."""
     try:
         if query.message.photo:
             await query.edit_message_caption(caption=new_text)
         else:
             await query.edit_message_text(text=new_text)
     except Exception:
-        # الرسالة ربما انحذفت أو تغيرت — نتجاهل بهدوء
         pass
 
 
 async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
-
     if not is_admin(user.id):
         await query.answer("هاد الإجراء للأدمن بس.", show_alert=True)
         return
@@ -573,12 +664,10 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, order_id_str = query.data.split("_")
     order_id = int(order_id_str)
     order = get_order(order_id)
-
     if not order:
         await _edit_admin_message(query, "⚠️ الطلب غير موجود.")
         return
 
-    # --- خطوة 1: ضغط "قبول" الأول -> ما منقبل فوراً، منبعت رسالة تأكيد منفصلة ---
     if action == "askapprove":
         if order["status"] != "pending":
             await _edit_admin_message(query, f"هاد الطلب سبق تعامل معه ({order['status']}).")
@@ -598,7 +687,6 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- خطوة 1: ضغط "رفض" الأول -> نفس الشي، منبعت رسالة تأكيد منفصلة ---
     if action == "askreject":
         if order["status"] != "pending":
             await _edit_admin_message(query, f"هاد الطلب سبق تعامل معه ({order['status']}).")
@@ -618,7 +706,6 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- "رجوع" (مشترك بين قبول ورفض) -> إلغاء خطوة التأكيد بدون أي تغيير عالطلب ---
     if action == "backconfirm":
         try:
             await query.edit_message_text("↩️ رجعنا، ما انعمل أي تغيير عالطلب.")
@@ -626,7 +713,6 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # --- action == "confirmreject": التأكيد الفعلي للرفض ---
     if action == "confirmreject":
         if order["status"] != "pending":
             try:
@@ -646,7 +732,7 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await clear_admin_message_buttons(context, order_id)
         return
 
-    # --- action == "confirmapprove": التأكيد الفعلي -> هون فقط منسلّم الكود ---
+    # action == "confirmapprove"
     if order["status"] != "pending":
         try:
             await query.edit_message_text(f"هاد الطلب سبق تعامل معه ({order['status']}).")
@@ -665,7 +751,6 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     set_order_code(order_id, code_row["id"])
     set_order_status(order_id, "approved")
-
     course = get_course(order["course_id"])
     await context.bot.send_message(
         chat_id=order["user_id"],
@@ -695,9 +780,6 @@ async def admin_only_guard(update: Update) -> bool:
 
 
 async def add_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الاستخدام: /addcourse الاسم;السعر;رقم شام كاش
-    مثال: /addcourse كورس اكسل;10$;0999999999
-    """
     if not await admin_only_guard(update):
         return
     text = update.message.text.partition(" ")[2]
@@ -717,9 +799,6 @@ async def add_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الاستخدام: /setprice رقم_الكورس السعر_بالدولار
-    مثال: /setprice 1 10
-    """
     if not await admin_only_guard(update):
         return
     parts = update.message.text.split(" ")
@@ -756,15 +835,12 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         crypto_price = f"{c['price_usdt']} USDT" if c["price_usdt"] else "غير مفعّل"
         lines.append(
             f"#{c['id']} {c['name']} - {c['price']} - أكواد متبقية: {n} - ({state})\n"
-            f"    💠 كريبتو: {crypto_price}"
+            f"   💠 كريبتو: {crypto_price}"
         )
     await update.message.reply_text("\n".join(lines))
 
 
 async def add_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الاستخدام: أرسل أمر /addcodes رقم_الكورس ثم بنفس الرسالة أو برسالة تالية
-    اكتب الأكواد كل واحد بسطر لحاله.
-    """
     if not await admin_only_guard(update):
         return
     lines = update.message.text.split("\n")
@@ -780,14 +856,12 @@ async def add_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not course:
         await update.message.reply_text("رقم الكورس مو موجود. استخدم /listcourses للتأكد.")
         return
-
     codes = [l.strip() for l in lines[1:] if l.strip()]
     if not codes:
         await update.message.reply_text(
             "ما لقيت أي أكواد بالرسالة. لازم كل كود يكون بسطر منفصل بعد سطر الأمر."
         )
         return
-
     db.add_codes(course_id, codes)
     await update.message.reply_text(
         f"تمت إضافة {len(codes)} كود لكورس {course['name']}.\n"
@@ -796,7 +870,6 @@ async def add_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def toggle_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الاستخدام: /togglecourse رقم_الكورس"""
     if not await admin_only_guard(update):
         return
     parts = update.message.text.split(" ")
@@ -821,12 +894,13 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = db.get_stats()
     await update.message.reply_text(
         f"📊 إحصائيات:\nإجمالي الطلبات: {s['total']}\n✅ مقبول: {s['approved']}\n"
-        f"⏳ قيد الانتظار: {s['pending']}\n❌ مرفوض: {s['rejected']}\n🪙 مدفوع بالكريبتو: {s['crypto']}"
+        f"⏳ قيد الانتظار: {s['pending']}\n❌ مرفوض: {s['rejected']}\n"
+        f"🪙 مدفوع بالكريبتو (الإجمالي): {s['crypto']}\n"
+        f"   ↳ TRC20: {s['crypto_trc20']} — BEP20: {s['crypto_bep20']}"
     )
 
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يرجع آيدي المستخدم - مفيد حتى تعرف آيدي أي حدا بدك تضيفه كأدمن."""
     user = update.effective_user
     await update.message.reply_text(f"آيدي حسابك: {user.id}")
 
@@ -855,12 +929,13 @@ def run_bot():
     if not ADMIN_IDS:
         logger.warning("تنبيه: ما في ADMIN_IDS محددين - ما رح توصلك طلبات الدفع!")
     if not TRON_WALLET_ADDRESS:
-        logger.warning("تنبيه: ما في TRON_WALLET_ADDRESS - الدفع بالكريبتو مو مفعّل.")
+        logger.warning("تنبيه: ما في TRON_WALLET_ADDRESS - الدفع بـ TRC20 مو مفعّل.")
+    if not BSC_WALLET_ADDRESS:
+        logger.warning("تنبيه: ما في BSC_WALLET_ADDRESS - الدفع بـ BEP20 مو مفعّل.")
     if not HARAM_RECEIVER_NAME:
         logger.warning("تنبيه: ما في HARAM_RECEIVER_NAME - الدفع بحوالة الهرم مو مفعّل.")
 
     db.init_db()
-
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -875,8 +950,17 @@ def run_bot():
     app.add_handler(CommandHandler("adminhelp", help_admin))
 
     app.add_handler(CallbackQueryHandler(course_selected, pattern=r"^course_\d+$"))
-    app.add_handler(CallbackQueryHandler(payment_method_selected, pattern=r"^pay_(shamcash|crypto|haram)_\d+$"))
-    app.add_handler(CallbackQueryHandler(admin_decision, pattern=r"^(askapprove|confirmapprove|askreject|confirmreject|backconfirm)_\d+$"))
+    app.add_handler(
+        CallbackQueryHandler(
+            payment_method_selected, pattern=r"^pay_(shamcash|crypto|cryptobep|haram)_\d+$"
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            admin_decision,
+            pattern=r"^(askapprove|confirmapprove|askreject|confirmreject|backconfirm)_\d+$",
+        )
+    )
 
     app.add_handler(MessageHandler(filters.PHOTO, receive_payment_proof))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text))
