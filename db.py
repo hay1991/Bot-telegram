@@ -224,6 +224,7 @@ def add_codes(course_id: int, codes: list) -> dict:
     conn.close()
     return {"added": added, "skipped": skipped}
 
+
 def delete_unused_code(code_id: int) -> bool:
     """يحذف كود بس إذا لسا غير مستخدم (حماية من حذف كود اتباع لزبون)."""
     conn = get_conn()
@@ -232,6 +233,7 @@ def delete_unused_code(code_id: int) -> bool:
     deleted = cur.rowcount > 0
     conn.close()
     return deleted
+
 
 def mark_code_used(code_id: int, user_id: int):
     conn = get_conn()
@@ -261,7 +263,6 @@ def claim_code(course_id: int, user_id: int):
             (user_id, datetime.utcnow().isoformat(), row["id"]),
         )
         if cur.rowcount != 1:
-            # حصل سباق نادر — نرجع None بدل ما نرجع كود ما انحجز
             conn.rollback()
             return None
         conn.commit()
@@ -309,17 +310,66 @@ def get_pending_order(user_id: int, course_id: int):
     return row
 
 
-def get_recent_orders(limit: int = 50):
+def get_orders(status=None, payment_method=None, search=None, date_from=None, date_to=None,
+               limit=50, offset=0):
+    """يرجع (rows, total) لقائمة الطلبات مع فلترة اختيارية وترقيم صفحات.
+
+    status: 'pending' / 'approved' / 'rejected' / 'no_stock' أو None لكل الحالات
+    payment_method: 'shamcash' / 'crypto_trc20' / 'crypto_bep20' / 'haram' أو None لكل الطرق
+        (ملاحظة: القيمة القديمة 'crypto' يلي كانت مستخدمة قبل إضافة BEP20 بتنحسب
+        مع 'crypto_trc20' تلقائياً عشان الطلبات القديمة تضل تظهر صح بالفلترة)
+    search: نص حر يدور بيه باسم الزبون أو يوزرنيمه أو آيدي حسابه
+    date_from / date_to: نص تاريخ بصيغة 'YYYY-MM-DD' لتحديد نطاق زمني على created_at
+    """
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT orders.*, courses.name AS course_name, codes.code AS delivered_code FROM orders "
+    where = ["1=1"]
+    params = []
+
+    if status:
+        where.append("orders.status = ?")
+        params.append(status)
+
+    if payment_method:
+        if payment_method == "crypto_trc20":
+            where.append("orders.payment_method IN ('crypto', 'crypto_trc20')")
+        else:
+            where.append("orders.payment_method = ?")
+            params.append(payment_method)
+
+    if search:
+        where.append(
+            "(orders.full_name LIKE ? OR orders.username LIKE ? OR CAST(orders.user_id AS TEXT) LIKE ?)"
+        )
+        like = f"%{search}%"
+        params.extend([like, like, like])
+
+    if date_from:
+        where.append("orders.created_at >= ?")
+        params.append(date_from)
+
+    if date_to:
+        where.append("orders.created_at <= ?")
+        params.append(date_to + "T23:59:59")
+
+    where_sql = " AND ".join(where)
+
+    base_query = (
+        "FROM orders "
         "JOIN courses ON courses.id = orders.course_id "
         "LEFT JOIN codes ON codes.id = orders.code_id "
-        "ORDER BY orders.id DESC LIMIT ?",
-        (limit,),
+        f"WHERE {where_sql}"
+    )
+
+    total = conn.execute(f"SELECT COUNT(*) AS c {base_query}", params).fetchone()["c"]
+
+    rows = conn.execute(
+        "SELECT orders.*, courses.name AS course_name, codes.code AS delivered_code "
+        f"{base_query} ORDER BY orders.id DESC LIMIT ? OFFSET ?",
+        params + [limit, offset],
     ).fetchall()
+
     conn.close()
-    return rows
+    return rows, total
 
 
 def set_order_status(order_id: int, status: str):
@@ -342,8 +392,11 @@ def get_stats():
     approved = conn.execute("SELECT COUNT(*) c FROM orders WHERE status='approved'").fetchone()["c"]
     pending = conn.execute("SELECT COUNT(*) c FROM orders WHERE status='pending'").fetchone()["c"]
     rejected = conn.execute("SELECT COUNT(*) c FROM orders WHERE status='rejected'").fetchone()["c"]
-    crypto = conn.execute(
-        "SELECT COUNT(*) c FROM orders WHERE payment_method='crypto' AND status='approved'"
+    crypto_trc20 = conn.execute(
+        "SELECT COUNT(*) c FROM orders WHERE payment_method IN ('crypto','crypto_trc20') AND status='approved'"
+    ).fetchone()["c"]
+    crypto_bep20 = conn.execute(
+        "SELECT COUNT(*) c FROM orders WHERE payment_method='crypto_bep20' AND status='approved'"
     ).fetchone()["c"]
     conn.close()
     return {
@@ -351,7 +404,9 @@ def get_stats():
         "approved": approved,
         "pending": pending,
         "rejected": rejected,
-        "crypto": crypto,
+        "crypto": crypto_trc20 + crypto_bep20,  # الإجمالي — يحافظ على توافق /stats بالبوت
+        "crypto_trc20": crypto_trc20,
+        "crypto_bep20": crypto_bep20,
     }
 
 
