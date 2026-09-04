@@ -4,6 +4,8 @@
 أو كتابة أوامر بالبوت. محمية بـ Basic Auth + CSRF + HTML escape.
 """
 import os
+import csv
+import io
 import secrets
 import html
 from functools import wraps
@@ -22,7 +24,6 @@ from flask import (
 import db
 
 app = Flask(__name__)
-# مفتاح الجلسة لـ CSRF — يُفضّل ضبطه من البيئة في الإنتاج
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 
 ADMIN_WEB_USER = os.environ.get("ADMIN_WEB_USER", "admin")
@@ -69,7 +70,6 @@ def _validate_csrf():
 
 
 def e(value) -> str:
-    """HTML-escape لأي قيمة قبل عرضها."""
     if value is None:
         return ""
     return html.escape(str(value), quote=True)
@@ -83,44 +83,44 @@ BASE = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>لوحة تحكم Deeb Learning</title>
 <style>
-  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --text:#e8eaed; --muted:#9aa3b2;
-          --accent:#4f8cff; --good:#22c55e; --bad:#ef4444; --warn:#f59e0b; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text);
-         font-family:'Segoe UI', Tahoma, Arial, sans-serif; }
-  header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex;
-           justify-content:space-between; align-items:center; }
-  header h1 { font-size:18px; margin:0; }
-  nav a { color:var(--muted); text-decoration:none; margin-inline-start:16px; font-size:14px; }
-  nav a:hover { color:var(--text); }
-  main { max-width:960px; margin:0 auto; padding:24px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
-          padding:18px; margin-bottom:18px; }
-  table { width:100%; border-collapse:collapse; font-size:14px; }
-  th, td { text-align:right; padding:10px 8px; border-bottom:1px solid var(--line); }
-  th { color:var(--muted); font-weight:600; }
-  .badge { padding:2px 8px; border-radius:999px; font-size:12px; }
-  .badge.good { background:rgba(34,197,94,.15); color:var(--good); }
-  .badge.bad { background:rgba(239,68,68,.15); color:var(--bad); }
-  .badge.warn { background:rgba(245,158,11,.15); color:var(--warn); }
-  .btn { display:inline-block; background:var(--accent); color:#fff; border:none;
-         padding:8px 14px; border-radius:8px; cursor:pointer; font-size:14px;
-         text-decoration:none; }
-  .btn.small { padding:4px 10px; font-size:12px; }
-  .btn.danger { background:var(--bad); }
-  .btn.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
-  input, textarea { width:100%; padding:9px 10px; border-radius:8px; border:1px solid var(--line);
-                    background:#10131a; color:var(--text); font-size:14px; margin-bottom:10px; }
-  label { font-size:13px; color:var(--muted); display:block; margin-bottom:4px; }
-  .row { display:flex; gap:10px; flex-wrap:wrap; }
-  .row > div { flex:1; min-width:160px; }
-  .muted { color:var(--muted); font-size:13px; }
-  .stats { display:flex; gap:14px; flex-wrap:wrap; }
-  .stat { background:var(--card); border:1px solid var(--line); border-radius:12px;
-          padding:14px 18px; min-width:120px; }
-  .stat b { font-size:22px; display:block; }
-  .flash { background:rgba(79,140,255,.12); border:1px solid var(--accent); color:var(--text);
-           padding:10px 14px; border-radius:8px; margin-bottom:16px; font-size:14px; }
+:root { --bg:#0f1115; --card:#171a21; --line:#262b36; --text:#e8eaed; --muted:#9aa3b2;
+        --accent:#4f8cff; --good:#22c55e; --bad:#ef4444; --warn:#f59e0b; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text);
+       font-family:'Segoe UI', Tahoma, Arial, sans-serif; }
+header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex;
+         justify-content:space-between; align-items:center; }
+header h1 { font-size:18px; margin:0; }
+nav a { color:var(--muted); text-decoration:none; margin-inline-start:16px; font-size:14px; }
+nav a:hover { color:var(--text); }
+main { max-width:960px; margin:0 auto; padding:24px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+        padding:18px; margin-bottom:18px; }
+table { width:100%; border-collapse:collapse; font-size:14px; }
+th, td { text-align:right; padding:10px 8px; border-bottom:1px solid var(--line); }
+th { color:var(--muted); font-weight:600; }
+.badge { padding:2px 8px; border-radius:999px; font-size:12px; }
+.badge.good { background:rgba(34,197,94,.15); color:var(--good); }
+.badge.bad { background:rgba(239,68,68,.15); color:var(--bad); }
+.badge.warn { background:rgba(245,158,11,.15); color:var(--warn); }
+.btn { display:inline-block; background:var(--accent); color:#fff; border:none;
+       padding:8px 14px; border-radius:8px; cursor:pointer; font-size:14px;
+       text-decoration:none; }
+.btn.small { padding:4px 10px; font-size:12px; }
+.btn.danger { background:var(--bad); }
+.btn.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+input, textarea, select { width:100%; padding:9px 10px; border-radius:8px; border:1px solid var(--line);
+       background:#10131a; color:var(--text); font-size:14px; margin-bottom:10px; }
+label { font-size:13px; color:var(--muted); display:block; margin-bottom:4px; }
+.row { display:flex; gap:10px; flex-wrap:wrap; }
+.row > div { flex:1; min-width:160px; }
+.muted { color:var(--muted); font-size:13px; }
+.stats { display:flex; gap:14px; flex-wrap:wrap; }
+.stat { background:var(--card); border:1px solid var(--line); border-radius:12px;
+        padding:14px 18px; min-width:120px; }
+.stat b { font-size:22px; display:block; }
+.flash { background:rgba(79,140,255,.12); border:1px solid var(--accent); color:var(--text);
+         padding:10px 14px; border-radius:8px; margin-bottom:16px; font-size:14px; }
 </style>
 </head>
 <body>
@@ -142,7 +142,6 @@ BASE = """
 
 
 def render(body_html, flash=None):
-    # flash نفسه لازم يكون escaped لو جاي من بيانات مستخدم
     safe_flash = e(flash) if flash else None
     return render_template_string(BASE, body=body_html, flash=safe_flash)
 
@@ -159,14 +158,15 @@ def csrf_field():
 def dashboard():
     s = db.get_stats()
     courses = db.get_all_courses()
-
     stats_html = f"""
     <div class="stats">
       <div class="stat"><b>{s['total']}</b><span class="muted">إجمالي الطلبات</span></div>
       <div class="stat"><b>{s['approved']}</b><span class="muted">مقبول</span></div>
       <div class="stat"><b>{s['pending']}</b><span class="muted">قيد الانتظار</span></div>
       <div class="stat"><b>{s['rejected']}</b><span class="muted">مرفوض</span></div>
-      <div class="stat"><b>{s['crypto']}</b><span class="muted">مدفوع بالكريبتو</span></div>
+      <div class="stat"><b>{s['crypto']}</b><span class="muted">مدفوع بالكريبتو (إجمالي)</span></div>
+      <div class="stat"><b>{s['crypto_trc20']}</b><span class="muted">كريبتو - TRC20</span></div>
+      <div class="stat"><b>{s['crypto_bep20']}</b><span class="muted">كريبتو - BEP20</span></div>
     </div>
     """
 
@@ -213,34 +213,34 @@ def dashboard():
 # ---------------------------------------------------------------------------
 def course_form_html(name="", price="", shamcash_number="", price_usdt="", extra=""):
     return f"""
-<div class="card">
-  <form method="post">
-    {csrf_field()}
-    <div class="row">
-      <div>
-        <label>اسم الكورس</label>
-        <input name="name" value="{e(name)}" required>
-      </div>
-      <div>
-        <label>السعر (نصي - للعرض بشام كاش، مثلاً 10$)</label>
-        <input name="price" value="{e(price)}" required>
-      </div>
+    <div class="card">
+      <form method="post">
+        {csrf_field()}
+        <div class="row">
+          <div>
+            <label>اسم الكورس</label>
+            <input name="name" value="{e(name)}" required>
+          </div>
+          <div>
+            <label>السعر (نصي - للعرض بشام كاش، مثلاً 10$)</label>
+            <input name="price" value="{e(price)}" required>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>رقم شام كاش</label>
+            <input name="shamcash_number" value="{e(shamcash_number)}" required>
+          </div>
+          <div>
+            <label>سعر الكريبتو بالدولار (اختياري - اتركه فاضي لو ما بدك تفعّل الكريبتو لهاد الكورس)</label>
+            <input name="price_usdt" value="{e(price_usdt)}">
+          </div>
+        </div>
+        <button class="btn" type="submit">حفظ</button>
+        {extra}
+      </form>
     </div>
-    <div class="row">
-      <div>
-        <label>رقم شام كاش</label>
-        <input name="shamcash_number" value="{e(shamcash_number)}" required>
-      </div>
-      <div>
-        <label>سعر الكريبتو بالدولار (اختياري - اتركه فاضي لو ما بدك تفعّل الكريبتو لهاد الكورس)</label>
-        <input name="price_usdt" value="{e(price_usdt)}">
-      </div>
-    </div>
-    <button class="btn" type="submit">حفظ</button>
-    {extra}
-  </form>
-</div>
-"""
+    """
 
 
 @app.route("/courses/new", methods=["GET", "POST"])
@@ -259,7 +259,6 @@ def new_course():
             except ValueError:
                 pass
         return redirect(url_for("dashboard"))
-
     body = "<div class='card'><h3>إضافة كورس جديد</h3></div>" + course_form_html()
     return render(body)
 
@@ -270,7 +269,6 @@ def edit_course(course_id):
     course = db.get_course(course_id)
     if not course:
         return redirect(url_for("dashboard"))
-
     if request.method == "POST":
         _validate_csrf()
         name = request.form["name"].strip()
@@ -290,8 +288,8 @@ def edit_course(course_id):
     extra = f"""
     <form method="post" action="{url_for('toggle_course_web', course_id=course_id)}"
           onsubmit="return confirm('متأكد بدك {e(toggle_label)}؟')">
-        {csrf_field()}
-        <button class="btn ghost" type="submit">{toggle_label}</button>
+      {csrf_field()}
+      <button class="btn ghost" type="submit">{toggle_label}</button>
     </form>
     """
     body = f"<div class='card'><h3>تعديل: {e(course['name'])}</h3></div>" + course_form_html(
@@ -342,10 +340,10 @@ def course_codes(course_id):
         else:
             badge = '<span class="badge good">متاح</span>'
             action = f"""<form method="post" action="{url_for('delete_code', course_id=course_id, code_id=c['id'])}"
-                onsubmit="return confirm('متأكد بدك تحذف هاد الكود؟')" style="display:inline">
-                {csrf_field()}
-                <button class="btn small danger" type="submit">حذف</button>
-            </form>"""
+                  onsubmit="return confirm('متأكد بدك تحذف هاد الكود؟')" style="display:inline">
+                  {csrf_field()}
+                  <button class="btn small danger" type="submit">حذف</button>
+                  </form>"""
         rows += f"<tr><td>{e(c['code'])}</td><td>{badge}</td><td>{action}</td></tr>"
 
     body = f"""
@@ -377,27 +375,126 @@ def delete_code(course_id, code_id):
 
 
 # ---------------------------------------------------------------------------
-# الطلبات
+# الطلبات — سجل كامل مع فلترة، ترقيم صفحات، وتصدير CSV
 # ---------------------------------------------------------------------------
-@app.route("/orders")
-@require_auth
-def orders_page():
-    orders = db.get_recent_orders(100)
-    status_badge = {
+ORDER_STATUSES = [
+    ("pending", "قيد الانتظار"),
+    ("approved", "مقبول"),
+    ("rejected", "مرفوض"),
+    ("no_stock", "لا يوجد مخزون"),
+]
+
+ORDER_PAYMENT_METHODS = [
+    ("shamcash", "شام كاش"),
+    ("crypto_trc20", "USDT (TRC20)"),
+    ("crypto_bep20", "USDT (BEP20)"),
+    ("haram", "حوالة الهرم"),
+]
+
+PAGE_SIZE = 50
+
+
+def _order_filters_from_request():
+    return {
+        "status": request.args.get("status") or None,
+        "payment_method": request.args.get("payment_method") or None,
+        "search": request.args.get("search") or None,
+        "date_from": request.args.get("date_from") or None,
+        "date_to": request.args.get("date_to") or None,
+    }
+
+
+def status_badge_html(status):
+    badges = {
         "approved": '<span class="badge good">مقبول</span>',
         "pending": '<span class="badge warn">قيد الانتظار</span>',
         "rejected": '<span class="badge bad">مرفوض</span>',
         "no_stock": '<span class="badge bad">لا يوجد مخزون</span>',
     }
-    def payment_label(o):
-        method = o["payment_method"]
-        ref = o["payment_ref"] if "payment_ref" in o.keys() else None
-        if method == "crypto":
-            return "🪙 كريبتو"
-        if method == "haram":
-            ref_part = f" — رقم: {e(ref)}" if ref else ""
-            return f"🏦 حوالة الهرم{ref_part}"
-        return "💳 شام كاش"
+    return badges.get(status, e(status))
+
+
+def payment_label(o):
+    method = o["payment_method"]
+    ref = o["payment_ref"] if "payment_ref" in o.keys() else None
+    if method in ("crypto", "crypto_trc20"):
+        return "🪙 USDT (TRC20)"
+    if method == "crypto_bep20":
+        return "🪙 USDT (BEP20)"
+    if method == "haram":
+        ref_part = f" — رقم: {e(ref)}" if ref else ""
+        return f"🏦 حوالة الهرم{ref_part}"
+    return "💳 شام كاش"
+
+
+@app.route("/orders")
+@require_auth
+def orders_page():
+    filters = _order_filters_from_request()
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except ValueError:
+        page = 1
+    offset = (page - 1) * PAGE_SIZE
+
+    orders, total = db.get_orders(
+        status=filters["status"],
+        payment_method=filters["payment_method"],
+        search=filters["search"],
+        date_from=filters["date_from"],
+        date_to=filters["date_to"],
+        limit=PAGE_SIZE,
+        offset=offset,
+    )
+
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    def option(value, label, current):
+        selected = "selected" if current == value else ""
+        return f'<option value="{e(value)}" {selected}>{e(label)}</option>'
+
+    status_options = '<option value="">كل الحالات</option>' + "".join(
+        option(v, label, filters["status"] or "") for v, label in ORDER_STATUSES
+    )
+    method_options = '<option value="">كل طرق الدفع</option>' + "".join(
+        option(v, label, filters["payment_method"] or "") for v, label in ORDER_PAYMENT_METHODS
+    )
+
+    export_qs = "&".join(f"{k}={e(v)}" for k, v in filters.items() if v)
+
+    filter_form = f"""
+    <div class="card">
+      <form method="get">
+        <div class="row">
+          <div>
+            <label>الحالة</label>
+            <select name="status">{status_options}</select>
+          </div>
+          <div>
+            <label>طريقة الدفع</label>
+            <select name="payment_method">{method_options}</select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>بحث (اسم / يوزرنيم / آيدي)</label>
+            <input name="search" value="{e(filters['search'] or '')}">
+          </div>
+          <div>
+            <label>من تاريخ</label>
+            <input type="date" name="date_from" value="{e(filters['date_from'] or '')}">
+          </div>
+          <div>
+            <label>لتاريخ</label>
+            <input type="date" name="date_to" value="{e(filters['date_to'] or '')}">
+          </div>
+        </div>
+        <button class="btn" type="submit">فلترة</button>
+        <a class="btn ghost" href="{url_for('orders_page')}">إلغاء الفلترة</a>
+        <a class="btn ghost" href="{url_for('orders_export')}?{export_qs}">⬇️ تصدير CSV (حسب الفلترة الحالية)</a>
+      </form>
+    </div>
+    """
 
     rows = ""
     for o in orders:
@@ -408,20 +505,81 @@ def orders_page():
           <td>{e(o['full_name'])} (@{uname})</td>
           <td>{e(o['course_name'])}</td>
           <td>{payment_label(o)}</td>
-          <td>{status_badge.get(o['status'], e(o['status']))}</td>
+          <td>{status_badge_html(o['status'])}</td>
           <td>{e(o['delivered_code']) if o['delivered_code'] else '—'}</td>
           <td class="muted">{e(str(o['created_at'])[:16].replace('T',' '))}</td>
         </tr>
         """
+
+    if total_pages > 1:
+        base_qs = "&".join(f"{k}={e(v)}" for k, v in filters.items() if v)
+        prev_qs = f"page={page-1}" + (("&" + base_qs) if base_qs else "")
+        next_qs = f"page={page+1}" + (("&" + base_qs) if base_qs else "")
+        prev_btn = f'<a class="btn small ghost" href="?{prev_qs}">◀ السابق</a>' if page > 1 else ""
+        next_btn = (
+            f'<a class="btn small ghost" href="?{next_qs}">التالي ▶</a>' if page < total_pages else ""
+        )
+        pagination = (
+            f'<div class="row" style="align-items:center;justify-content:space-between">'
+            f'<span class="muted">صفحة {page} من {total_pages} — إجمالي {total} طلب</span>'
+            f"<div>{prev_btn} {next_btn}</div></div>"
+        )
+    else:
+        pagination = f'<div class="muted">إجمالي {total} طلب</div>'
+
     body = f"""
+    {filter_form}
     <div class="card">
+      {pagination}
       <table>
         <tr><th>#</th><th>الزبون</th><th>الكورس</th><th>طريقة الدفع</th><th>الحالة</th><th>الكود المسلَّم</th><th>التاريخ</th></tr>
-        {rows if orders else '<tr><td colspan="7" class="muted">ما في طلبات بعد.</td></tr>'}
+        {rows if orders else '<tr><td colspan="7" class="muted">ما في طلبات مطابقة.</td></tr>'}
       </table>
     </div>
     """
     return render(body)
+
+
+@app.route("/orders/export")
+@require_auth
+def orders_export():
+    filters = _order_filters_from_request()
+    orders, _total = db.get_orders(
+        status=filters["status"],
+        payment_method=filters["payment_method"],
+        search=filters["search"],
+        date_from=filters["date_from"],
+        date_to=filters["date_to"],
+        limit=1_000_000,
+        offset=0,
+    )
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        ["#", "الاسم", "يوزرنيم", "آيدي", "الكورس", "طريقة الدفع", "الحالة", "الكود المسلَّم", "التاريخ"]
+    )
+    for o in orders:
+        writer.writerow(
+            [
+                o["id"],
+                o["full_name"],
+                o["username"] or "",
+                o["user_id"],
+                o["course_name"],
+                o["payment_method"],
+                o["status"],
+                o["delivered_code"] or "",
+                o["created_at"],
+            ]
+        )
+
+    csv_data = "\ufeff" + buf.getvalue()  # BOM حتى إكسل يفتحه صح مع الحروف العربية
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=orders.csv"},
+    )
 
 
 def run_web():
